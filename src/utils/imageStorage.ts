@@ -1,48 +1,41 @@
 import { supabase } from '../lib/supabase';
-import FishStorage from './fishStorage';
 import ImageCache from './imageCache';
 
 class ImageStorage {
   private static readonly DEFAULT_USER_ID = '00000000-0000-0000-0000-000000000000';
 
-  static async storeImage(searchName: string, imageUrl: string, isBase64 = false): Promise<void> {
-    if (!searchName || !imageUrl) {
-      throw new Error('Invalid search name or image URL');
+  static async storeImage(searchName: string, imageData: string): Promise<void> {
+    if (!searchName || !imageData) {
+      throw new Error('Invalid search name or image data');
+    }
+
+    if (!imageData.startsWith('data:image/')) {
+      throw new Error('Invalid image format - must be base64 image data');
+    }
+
+    // Check size limit (2MB)
+    if (imageData.length > 2 * 1024 * 1024) {
+      throw new Error('Image too large - must be less than 2MB');
     }
 
     const normalizedSearchName = searchName.toUpperCase().trim();
 
     try {
-      // For base64 images, we only need to validate the format
-      if (isBase64 && !imageUrl.startsWith('data:image/')) {
-        throw new Error('Invalid base64 image format');
-      }
-
-      // For URLs, validate the image
-      if (!isBase64) {
-        const isValid = await ImageCache.validateImage(imageUrl);
-        if (!isValid) {
-          throw new Error('Unable to validate image URL');
-        }
-      }
-
-      // First try to delete any existing image
+      // Delete any existing image
       const { error: deleteError } = await supabase
         .from('fish_images')
         .delete()
         .eq('search_name', normalizedSearchName)
         .eq('user_id', this.DEFAULT_USER_ID);
 
-      if (deleteError) {
-        throw deleteError;
-      }
+      if (deleteError) throw deleteError;
 
-      // Then insert the new image
+      // Insert the new image
       const { error: insertError } = await supabase
         .from('fish_images')
         .upsert({
           search_name: normalizedSearchName,
-          image_url: imageUrl,
+          image_url: imageData,
           user_id: this.DEFAULT_USER_ID,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
@@ -50,14 +43,8 @@ class ImageStorage {
 
       if (insertError) throw insertError;
 
-      // Clear caches to ensure fresh data
-      await FishStorage.clearCache();
+      // Clear the image cache
       ImageCache.clear();
-
-      // Preload the new image if it's a URL
-      if (!isBase64) {
-        await ImageCache.preloadImages([{ imageUrl } as any]);
-      }
 
     } catch (error) {
       console.error('Error storing image:', error);
@@ -79,21 +66,8 @@ class ImageStorage {
         .maybeSingle();
 
       if (imageError) throw imageError;
+      return imageData?.image_url || null;
 
-      if (imageData?.image_url) {
-        // If it's a base64 image, return it directly
-        if (imageData.image_url.startsWith('data:image/')) {
-          return imageData.image_url;
-        }
-
-        // For URLs, validate the image
-        const isValid = await ImageCache.validateImage(imageData.image_url);
-        if (isValid) {
-          return imageData.image_url;
-        }
-      }
-
-      return null;
     } catch (error) {
       console.error('Error getting stored image:', error);
       return null;

@@ -6,7 +6,7 @@ import CartButton from './components/CartButton';
 import CSVView from './components/CSVView';
 import { initializeSupabase } from './lib/supabase';
 import { CartProvider } from './contexts/CartContext';
-import { FishDataProvider } from './contexts/FishDataContext';
+import { FishDataContext, FishDataProvider } from './contexts/FishDataContext';
 import CheckoutPage from './routes/CheckoutPage';
 import CartPage from './routes/CartPage';
 import OrderHistory from './components/orders/OrderHistory';
@@ -15,7 +15,7 @@ import AdminDashboard from './components/admin/AdminDashboard';
 import EbayManagement from './components/admin/EbayManagement';
 import { useCart } from './contexts/CartContext';
 
-function AppContent() {
+const AppContent = () => {
   const navigate = useNavigate();
   const { items: cartItems } = useCart();
   const [isAdmin, setIsAdmin] = useState(() => {
@@ -38,8 +38,12 @@ function AppContent() {
   useEffect(() => {
     const initDb = async () => {
       try {
+        console.log('Starting database initialization...');
         const success = await initializeSupabase();
+        console.log('Database initialization result:', success);
+        
         if (success) {
+          console.log('Database initialized successfully');
           setDbInitialized(true);
           setDbError(null);
         } else {
@@ -50,14 +54,17 @@ function AppContent() {
         setDbError('Unable to connect to the database. Please try again.');
         
         if (initAttempts < 3) {
+          const delay = 2000 * (initAttempts + 1);
+          console.log(`Retrying in ${delay}ms...`);
           setTimeout(() => {
             setInitAttempts(prev => prev + 1);
-          }, 2000 * (initAttempts + 1));
+          }, delay);
         }
       }
     };
 
     if (!dbInitialized && !dbError) {
+      console.log('Initializing database...');
       initDb();
     }
   }, [initAttempts, dbInitialized]);
@@ -377,9 +384,14 @@ function AppContent() {
             path="/" 
             element={
               !dbInitialized ? (
-                <div className="flex flex-col items-center justify-center h-64">
-                  <div className="animate-spin h-8 w-8 border-4 border-orange-500 border-t-transparent rounded-full mb-4"></div>
-                  <p className="text-gray-600">Connecting to database...</p>
+                <div className="flex flex-col items-center justify-center min-h-[50vh]">
+                  <div className="animate-spin h-12 w-12 border-4 border-orange-500 border-t-transparent rounded-full mb-6"></div>
+                  <p className="text-lg text-gray-600 mb-2">Connecting to database...</p>
+                  {initAttempts > 0 && (
+                    <p className="text-sm text-gray-500">
+                      Attempt {initAttempts + 1} of 4...
+                    </p>
+                  )}
                 </div>
               ) : showEbayManagement && isAdmin ? (
                 <EbayManagement />

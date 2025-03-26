@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useContext } from 'react';
 import { Upload, FileUp, List, Download, ChevronDown, DollarSign, Eye, EyeOff, Percent, Package, Ban, Trash2 } from 'lucide-react';
 import { parseCsvFile } from '../utils/csvParser';
 import { FishData } from '../types';
@@ -10,7 +10,8 @@ import LoadingIndicator from './LoadingIndicator';
 import StatsDisplay from './Stats';
 import ImageCache from '../utils/imageCache';
 import ImageStorage from '../utils/imageStorage';
-import { useFishData } from '../contexts/FishDataContext';
+import { useFishData } from '../hooks/useFishData';
+import { FishDataContext } from '../contexts/FishDataContext';
 
 interface FishListProps {
   isAdmin: boolean;
@@ -31,15 +32,22 @@ const FishList = React.memo<FishListProps>(({
   onCategoriesUpdate,
   renderCustomView
 }) => {
-  const { fishData, setFishData, loading, error: contextError, refreshData } = useFishData();
+  const { 
+    fishData, 
+    setFishData, 
+    loading, 
+    error: contextError, 
+    refreshData,
+    progress,
+    categories 
+  } = useContext(FishDataContext);
+  
   const [error, setError] = useState<string | null>(null);
   const [loadingStage, setLoadingStage] = useState<'database' | 'images' | 'processing' | 'deleting'>('database');
   const [loadingMessage, setLoadingMessage] = useState<string>('');
-  const [loadingProgress, setLoadingProgress] = useState(0);
-  const [loadingTotal, setLoadingTotal] = useState(0);
+  const [bulkProgress, setBulkProgress] = useState(0);
+  const [bulkTotal, setBulkTotal] = useState(0);
   const [showProgress, setShowProgress] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [progressTotal, setProgressTotal] = useState(0);
   const [showDisabled, setShowDisabled] = useState(false);
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -70,8 +78,8 @@ const FishList = React.memo<FishListProps>(({
       if (categoryFish.length === 0) return;
 
       setShowProgress(true);
-      setProgress(0);
-      setProgressTotal(categoryFish.length);
+      setBulkProgress(0);
+      setBulkTotal(categoryFish.length);
 
       await FishStorage.updateCategoryStatus(category, disable);
 
@@ -84,16 +92,48 @@ const FishList = React.memo<FishListProps>(({
         )
       );
 
-      setProgress(categoryFish.length);
+      setBulkProgress(categoryFish.length);
 
     } catch (error) {
       console.error('Error toggling category:', error);
       setError('Failed to toggle category status');
     } finally {
-      setShowProgress(false);
       setLoadingMessage('');
-      setLoadingProgress(0);
-      setLoadingTotal(0);
+      setBulkProgress(0);
+      setBulkTotal(0);
+      setShowProgress(false);
+    }
+  };
+
+  const handleToggleItem = async (fish: FishData) => {
+    if (!fish.id) return;
+
+    try {
+      setShowProgress(true);
+      setBulkProgress(0);
+      setBulkTotal(1);
+
+      await FishStorage.updateItemStatus(fish.id, !fish.disabled);
+
+      // Update local state instead of refetching
+      setFishData(prevData => 
+        prevData.map(item => 
+          item.id === fish.id
+            ? { ...item, disabled: !item.disabled }
+            : item
+        )
+      );
+
+      setBulkProgress(1);
+
+    } catch (error) {
+      console.error('Error toggling item:', error);
+      setError('Failed to toggle item status');
+    } finally {
+      setLoadingMessage('');
+      setBulkProgress(0);
+      setBulkTotal(0);
+      setShowProgress(false);
     }
   };
 
@@ -142,20 +182,21 @@ const FishList = React.memo<FishListProps>(({
     }
   };
 
-  const handleClearData = async () => {
-    if (!hasData) return;
-
-    if (!window.confirm('Are you sure you want to clear all data? This cannot be undone.')) {
-      return;
-    }
+  const handleBulkAction = async () => {
+    setError(null);
+    setLoadingStage('processing');
+    setShowProgress(true);
+    setBulkProgress(0);
+    setBulkTotal(selectedItems.size);
 
     try {
-      setLoadingStage('deleting');
-      setLoadingMessage('Clearing existing data...');
+      if (!window.confirm('Are you sure you want to clear all data? This cannot be undone.')) {
+        return;
+      }
 
       await FishStorage.clearAllData((current, total) => {
-        setLoadingProgress(current);
-        setLoadingTotal(total);
+        setBulkProgress(current);
+        setBulkTotal(total);
       });
 
       setFishData([]);
@@ -163,12 +204,12 @@ const FishList = React.memo<FishListProps>(({
       onCategoryChange('');
 
     } catch (error) {
-      console.error('Error clearing data:', error);
-      setError('Failed to clear data. Please try again.');
+      setError(error instanceof Error ? error.message : 'An error occurred');
     } finally {
       setLoadingMessage('');
-      setLoadingProgress(0);
-      setLoadingTotal(0);
+      setBulkProgress(0);
+      setBulkTotal(0);
+      setShowProgress(false);
     }
   };
 
@@ -194,45 +235,30 @@ const FishList = React.memo<FishListProps>(({
       setError('Failed to delete item. Please try again.');
     } finally {
       setLoadingMessage('');
-      setLoadingProgress(0);
-      setLoadingTotal(0);
+      setBulkProgress(0);
+      setBulkTotal(0);
+      setShowProgress(false);
     }
   };
 
-  const handleImageUpdate = async (searchName: string, imageUrl: string) => {
-    if (!searchName || !imageUrl) {
-      console.error('Invalid search name or image URL');
+  const handleImageUpdate = async (searchName: string, imageData: string) => {
+    if (!searchName || !imageData) {
+      console.error('Missing search name or image data');
       return;
     }
 
     try {
-      setLoadingStage('images');
-      setLoadingMessage('Updating image...');
-
-      await ImageStorage.storeImage(searchName, imageUrl);
-
-      // Update local state instead of refetching
-      setFishData(prevData => 
-        prevData.map(fish => 
-          fish.searchName === searchName 
-            ? { ...fish, imageUrl } 
-            : fish
-        )
-      );
-
-      await ImageCache.preloadImages([{ imageUrl } as FishData]);
-
-      setIsModalOpen(false);
-      setSelectedFish(null);
-
+      await ImageStorage.storeImage(searchName, imageData);
+      refreshData();
     } catch (error) {
       console.error('Error updating image:', error);
-      setError('Failed to update image. Please try again.');
-    } finally {
-      setLoadingMessage('');
-      setLoadingProgress(0);
-      setLoadingTotal(0);
+      throw error;
     }
+  };
+
+  const handleImageUpdated = () => {
+    // Refresh the fish list to get updated images
+    loadFishData();
   };
 
   const filteredFishData = useMemo(() => {
@@ -298,19 +324,19 @@ const FishList = React.memo<FishListProps>(({
 
   if (loading || contextError) {
     return (
-      <LoadingIndicator 
-        stage={loadingStage}
-        progress={loadingTotal > 0 ? {
-          current: loadingProgress,
-          total: loadingTotal
-        } : undefined}
-        message={loadingMessage || contextError}
-      />
+      <div className="container mx-auto px-4 py-8">
+        <LoadingIndicator
+          message={progress ? `Loading ${progress?.loaded} of ${progress?.total} ${progress?.stage === 'images' ? 'images' : 'items'}...` : 'Initializing...'}
+          showProgress={progress !== null}
+          loaded={progress?.loaded}
+          total={progress?.total}
+        />
+      </div>
     );
   }
 
   return (
-    <div className="space-y-6">
+    <div className="container mx-auto px-4 py-8">
       {isAdmin && (
         <>
           <div className="bg-white rounded-lg shadow-md p-6 mb-6">
@@ -341,7 +367,7 @@ const FishList = React.memo<FishListProps>(({
                     />
                   </label>
                   <button
-                    onClick={handleClearData}
+                    onClick={handleBulkAction}
                     disabled={!hasData || isProcessing}
                     className={`flex items-center gap-2 px-4 py-2 rounded-md transition-colors ${
                       !hasData || isProcessing
@@ -401,25 +427,21 @@ const FishList = React.memo<FishListProps>(({
                         <FishCard
                           key={fish.uniqueId}
                           fish={fish}
-                          onImageClick={() => handleSearchClick(fish)}
                           isAdmin={isAdmin}
-                          onToggleDisabled={async () => {
-                            try {
-                              await FishStorage.updateCategoryStatus(fish.category || '', !fish.disabled);
-                              setFishData(prevData => 
-                                prevData.map(item => 
-                                  item.id === fish.id
-                                    ? { ...item, disabled: !fish.disabled }
-                                    : item
-                                )
-                              );
-                            } catch (error) {
-                              console.error('Error toggling fish status:', error);
-                              setError('Failed to toggle fish status');
+                          isSelected={selectedItems.has(fish.uniqueId)}
+                          onSelect={(checked) => {
+                            const newSelected = new Set(selectedItems);
+                            if (checked) {
+                              newSelected.add(fish.uniqueId);
+                            } else {
+                              newSelected.delete(fish.uniqueId);
                             }
+                            setSelectedItems(newSelected);
                           }}
+                          onToggleDisabled={() => handleToggleItem(fish)}
+                          onUpdateSalePrice={(price) => handleImageUpdate(fish.searchName, price)}
                           onDelete={() => handleDeleteItem(fish)}
-                          onImageUpdate={handleImageUpdate}
+                          onImageUpdated={() => refreshData()}
                         />
                       ))}
                     </div>
@@ -436,26 +458,29 @@ const FishList = React.memo<FishListProps>(({
         </div>
       </div>
 
-      <SearchModal
-        isOpen={isModalOpen}
-        onClose={() => {
-          setIsModalOpen(false);
-          setSelectedFish(null);
-        }}
-        url={selectedFish?.searchUrl || ''}
-        fish={selectedFish}
-        onImageUpdate={handleImageUpdate}
-      />
-
-      {showProgress && (
-        <LoadingIndicator
-          stage="processing"
-          progress={{
-            current: progress,
-            total: progressTotal
+      {isModalOpen && selectedFish && (
+        <SearchModal
+          fish={selectedFish}
+          onClose={() => {
+            setIsModalOpen(false);
+            setSelectedFish(null);
           }}
-          message="Processing bulk action..."
+          onImageUpdate={handleImageUpdate}
         />
+      )}
+
+      {showProgress && bulkTotal > 0 && (
+        <div className="fixed bottom-4 right-4 bg-white rounded-lg shadow-lg p-4 max-w-sm">
+          <div className="text-sm font-medium text-gray-700">
+            Processing... ({Math.round((bulkProgress / bulkTotal) * 100)}%)
+          </div>
+          <div className="mt-2 h-1 bg-gray-100 rounded-full">
+            <div 
+              className="h-full bg-blue-600 rounded-full transition-all duration-300"
+              style={{ width: `${(bulkProgress / bulkTotal) * 100}%` }}
+            />
+          </div>
+        </div>
       )}
     </div>
   );

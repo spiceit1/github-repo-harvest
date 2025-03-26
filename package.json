@@ -10,6 +10,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@chakra-ui/next-js": "^2.4.2",
+    "@chakra-ui/provider": "^2.4.2",
+    "@chakra-ui/react": "^2.8.2",
+    "@chakra-ui/toast": "^7.0.2",
+    "@emotion/react": "^11.11.3",
+    "@emotion/styled": "^11.11.0",
     "@supabase/supabase-js": "^2.39.3",
     "axios": "^1.6.7",
     "chart.js": "^4.4.1",
@@ -17,15 +23,16 @@
     "decimal.js": "^10.4.3",
     "ebay-api": "^8.6.0",
     "ebay-node-api": "^2.9.0",
+    "framer-motion": "^10.18.0",
     "lucide-react": "^0.344.0",
     "papaparse": "^5.4.1",
     "react": "^18.3.1",
     "react-chartjs-2": "^5.2.0",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.22.3"
+    "react-router-dom": "^6.22.1"
   },
   "devDependencies": {
-    "@eslint/js": "^9.9.1", 
+    "@eslint/js": "^9.9.1",
     "@types/papaparse": "^5.3.14",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
@@ -36,6 +43,7 @@
     "eslint-plugin-react-refresh": "^0.4.11",
     "globals": "^15.9.0",
     "postcss": "^8.4.35",
+    "supabase": "^2.19.7",
     "tailwindcss": "^3.4.1",
     "typescript": "^5.5.3",
     "typescript-eslint": "^8.3.0",

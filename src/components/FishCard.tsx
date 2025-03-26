@@ -1,11 +1,15 @@
 import React, { useState } from 'react';
-import { ExternalLink, Eye, EyeOff, Package, AlertCircle, Check, X, Trash2, ShoppingCart, Share2 } from 'lucide-react';
+import { ExternalLink, Eye, EyeOff, Package, AlertCircle, Check, X, Trash2, ShoppingCart, Share2, Database, Link, Image } from 'lucide-react';
 import { FishData } from '../types';
 import QuantityControl from './QuantityControl';
 import ImageLoader from './ImageLoader';
 import { useCart } from '../contexts/CartContext';
+import { useAuth } from '../contexts/AuthContext';
 import { formatFishName } from '../utils/formatters';
 import EbayService from '../utils/ebayService';
+import ImageCache from '../utils/imageCache';
+import { ImagePasteModal } from './ImagePasteModal';
+import ImageStorage from '../utils/imageStorage';
 
 interface FishCardProps {
   fish: FishData;
@@ -17,6 +21,7 @@ interface FishCardProps {
   onUpdateSalePrice?: (price: number) => void;
   onDelete?: () => void;
   onImageUpdate?: (imageUrl: string) => void;
+  onImageUpdated: () => void;
 }
 
 const FishCard: React.FC<FishCardProps> = ({ 
@@ -28,7 +33,8 @@ const FishCard: React.FC<FishCardProps> = ({
   onToggleDisabled,
   onUpdateSalePrice,
   onDelete,
-  onImageUpdate
+  onImageUpdate,
+  onImageUpdated
 }) => {
   const { items, addItem, updateQuantity } = useCart();
   const [isEditingPrice, setIsEditingPrice] = useState(false);
@@ -37,6 +43,7 @@ const FishCard: React.FC<FishCardProps> = ({
   const [currentImageUrl, setCurrentImageUrl] = useState(fish.imageUrl);
   const [isListingOnEbay, setIsListingOnEbay] = useState(false);
   const [ebayError, setEbayError] = useState<string | null>(null);
+  const [showModal, setShowModal] = useState(false);
 
   const cartItem = items.find(item => item.fish.uniqueId === fish.uniqueId);
   const quantity = cartItem?.quantity || 0;
@@ -97,6 +104,36 @@ const FishCard: React.FC<FishCardProps> = ({
 
   const isLastOne = fish.qtyoh === 1;
   const { displayName, size, gender } = formatFishName(fish.name);
+
+  // Function to check if the image is a base64 image
+  const isBase64Image = (url?: string): boolean => {
+    return !!url && url.startsWith('data:image/');
+  };
+  
+  // Get the image type for display
+  const getImageType = (): { type: 'base64' | 'url' | 'none'; size?: string } => {
+    if (!currentImageUrl) return { type: 'none' };
+    
+    if (isBase64Image(currentImageUrl)) {
+      // Calculate approximate size of base64 image
+      const base64Length = currentImageUrl.length - (currentImageUrl.indexOf(',') + 1);
+      const sizeInKB = Math.round(base64Length * 0.75 / 1024);
+      return { type: 'base64', size: `~${sizeInKB} KB` };
+    }
+    
+    return { type: 'url' };
+  };
+
+  const handleImagePasted = async (searchName: string, base64Data: string) => {
+    try {
+      await ImageStorage.storeImage(searchName, base64Data);
+      setCurrentImageUrl(base64Data); // Immediately update the UI
+      setShowModal(false);
+    } catch (error) {
+      console.error('Error storing image:', error);
+      throw error;
+    }
+  };
 
   return (
     <div 
@@ -245,18 +282,27 @@ const FishCard: React.FC<FishCardProps> = ({
             )}
 
             {isAdmin && (
-              <button
-                onClick={handleListOnEbay}
-                disabled={isListingOnEbay}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-                  fish.ebay_listing_id
-                    ? 'bg-green-500 hover:bg-green-600 text-white'
-                    : 'bg-blue-500 hover:bg-blue-600 text-white'
-                } disabled:opacity-50 disabled:cursor-not-allowed`}
-              >
-                <Share2 className="h-5 w-5" />
-                {fish.ebay_listing_id ? 'Update eBay Listing' : 'List on eBay'}
-              </button>
+              <>
+                <button
+                  onClick={handleListOnEbay}
+                  disabled={isListingOnEbay}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+                    fish.ebay_listing_id
+                      ? 'bg-green-500 hover:bg-green-600 text-white'
+                      : 'bg-blue-500 hover:bg-blue-600 text-white'
+                  } disabled:opacity-50 disabled:cursor-not-allowed`}
+                >
+                  <Share2 className="h-5 w-5" />
+                  {fish.ebay_listing_id ? 'Update eBay Listing' : 'List on eBay'}
+                </button>
+                <button
+                  onClick={() => setShowModal(true)}
+                  className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+                >
+                  <Image className="h-4 w-4" />
+                  Update Image
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -269,43 +315,67 @@ const FishCard: React.FC<FishCardProps> = ({
         )}
 
         {isAdmin && (
-          <div className="mt-4 flex gap-4">
-            <button
-              onClick={onImageClick}
-              className="text-sm text-blue-600 hover:underline"
-            >
-              Update Image
-            </button>
-            <button
-              onClick={onToggleDisabled}
-              className={`text-sm flex items-center gap-1 ${fish.disabled ? 'text-green-600' : 'text-red-600'}`}
-            >
-              {fish.disabled ? (
-                <>
-                  <Eye className="h-4 w-4" /> Enable
-                </>
-              ) : (
-                <>
-                  <EyeOff className="h-4 w-4" /> Disable
-                </>
-              )}
-            </button>
-            {onDelete && (
+          <div className="mt-4 flex flex-col gap-2">
+            <div className="flex gap-4">
               <button
-                onClick={() => {
-                  if (window.confirm('Are you sure you want to delete this item? This action cannot be undone.')) {
-                    onDelete();
-                  }
-                }}
-                className="text-sm flex items-center gap-1 text-red-600 hover:text-red-700"
+                onClick={onToggleDisabled}
+                className={`text-sm flex items-center gap-1 ${fish.disabled ? 'text-green-600' : 'text-red-600'}`}
               >
-                <Trash2 className="h-4 w-4" />
-                Delete
+                {fish.disabled ? (
+                  <>
+                    <Eye className="h-4 w-4" /> Enable
+                  </>
+                ) : (
+                  <>
+                    <EyeOff className="h-4 w-4" /> Disable
+                  </>
+                )}
               </button>
+              {onDelete && (
+                <button
+                  onClick={() => {
+                    if (window.confirm('Are you sure you want to delete this item? This action cannot be undone.')) {
+                      onDelete();
+                    }
+                  }}
+                  className="text-sm flex items-center gap-1 text-red-600 hover:text-red-700"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete
+                </button>
+              )}
+            </div>
+            
+            {/* Image source type indicator */}
+            {currentImageUrl && (
+              <div className="text-xs flex items-center gap-1">
+                {getImageType().type === 'base64' ? (
+                  <>
+                    <Database className="h-3 w-3 text-green-600" />
+                    <span className="text-green-600 font-medium">Base64 Image</span>
+                    {getImageType().size && (
+                      <span className="text-gray-500">({getImageType().size})</span>
+                    )}
+                  </>
+                ) : getImageType().type === 'url' ? (
+                  <>
+                    <Link className="h-3 w-3 text-blue-600" />
+                    <span className="text-blue-600 font-medium">URL Image</span>
+                  </>
+                ) : null}
+              </div>
             )}
           </div>
         )}
       </div>
+
+      {showModal && (
+        <ImagePasteModal
+          searchName={fish.searchName}
+          onClose={() => setShowModal(false)}
+          onImagePasted={handleImagePasted}
+        />
+      )}
     </div>
   );
 };

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { ImageOff } from 'lucide-react';
 import ImageCache from '../utils/imageCache';
 
@@ -9,7 +9,7 @@ interface ImageLoaderProps {
   onClick?: () => void;
 }
 
-const ImageLoader: React.FC<ImageLoaderProps> = ({
+const ImageLoader: React.FC<ImageLoaderProps> = React.memo(({
   src,
   alt,
   className = '',
@@ -18,85 +18,74 @@ const ImageLoader: React.FC<ImageLoaderProps> = ({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
-  const mounted = React.useRef(true);
 
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
+  const handleLoad = useCallback(() => {
+    setLoading(false);
+  }, []);
+
+  const handleError = useCallback(() => {
+    setError(true);
+    setLoading(false);
+    setImageSrc(ImageCache.FALLBACK_IMAGE);
   }, []);
 
   useEffect(() => {
-    const loadImage = async () => {
-      if (!src) {
-        if (mounted.current) {
-          setError(true);
-          setLoading(false);
-          setImageSrc(ImageCache.FALLBACK_IMAGE);
-        }
-        return;
-      }
+    if (!src) {
+      handleError();
+      return;
+    }
 
-      try {
-        setLoading(true);
-        setError(false);
+    setLoading(true);
+    setError(false);
 
-        // For base64 images, use directly
-        if (src.startsWith('data:image/')) {
-          setImageSrc(src);
-          setLoading(false);
-          return;
-        }
+    // For base64 images, use directly
+    if (src.startsWith('data:image/')) {
+      setImageSrc(src);
+      return;
+    }
 
-        // For URLs, try to load with cache
-        const imageUrl = ImageCache.getImage(src);
-        
-        // Create a new image element to test the source
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        
-        await new Promise((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error('Image load timeout'));
-          }, 8000); // 8 second timeout
+    // For URLs, try to get from cache first
+    const cachedImage = ImageCache.getImage(src);
+    if (cachedImage) {
+      setImageSrc(cachedImage.src);
+      setLoading(false);
+      return;
+    }
 
-          img.onload = () => {
-            clearTimeout(timeout);
-            resolve(null);
-          };
-          
-          img.onerror = () => {
-            clearTimeout(timeout);
-            reject(new Error('Image load failed'));
-          };
+    // Load the image
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    
+    const timeout = setTimeout(() => {
+      handleError();
+    }, 5000);
 
-          img.src = imageUrl;
-        });
-
-        if (mounted.current) {
-          setImageSrc(imageUrl);
-          setLoading(false);
-        }
-      } catch (error) {
-        console.warn(`Error loading image (${src}):`, error);
-        if (mounted.current) {
-          setError(true);
-          setLoading(false);
-          setImageSrc(ImageCache.FALLBACK_IMAGE);
-        }
-      }
+    img.onload = () => {
+      clearTimeout(timeout);
+      setImageSrc(src);
+      setLoading(false);
     };
 
-    loadImage();
-  }, [src]);
+    img.onerror = () => {
+      clearTimeout(timeout);
+      handleError();
+    };
 
-  const handleClick = (e: React.MouseEvent) => {
+    img.src = src;
+
+    return () => {
+      clearTimeout(timeout);
+      img.onload = null;
+      img.onerror = null;
+    };
+  }, [src, handleError]);
+
+  const handleClick = useCallback((e: React.MouseEvent) => {
     if (onClick) {
       e.stopPropagation();
       onClick();
     }
-  };
+  }, [onClick]);
 
   if (error || !imageSrc) {
     return (
@@ -115,18 +104,14 @@ const ImageLoader: React.FC<ImageLoaderProps> = ({
         src={imageSrc}
         alt={alt}
         className={`w-full h-full object-contain ${loading ? 'opacity-0' : 'opacity-100'} transition-opacity duration-300`}
-        onError={() => {
-          setError(true);
-          setLoading(false);
-          setImageSrc(ImageCache.FALLBACK_IMAGE);
-        }}
-        onLoad={() => setLoading(false)}
+        onError={handleError}
+        onLoad={handleLoad}
       />
       {loading && (
         <div className="absolute inset-0 bg-gray-100 animate-pulse" />
       )}
     </div>
   );
-};
+});
 
 export default ImageLoader;

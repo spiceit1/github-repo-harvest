@@ -16,6 +16,8 @@ export interface FishData {
   disabled?: boolean;    // Whether the item is disabled
   archived?: boolean;    // Whether the item is archived
   qtyoh?: number;       // Quantity on hand (lowercase to match DB column)
+  ebay_listing_id?: string;  // eBay listing ID
+  ebay_listing_status?: string;  // eBay listing status
 }
 
 export interface CartItem {

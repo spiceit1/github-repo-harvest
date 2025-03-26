@@ -37,14 +37,32 @@ const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, url, fish, o
 
   const handlePaste = async (e: React.ClipboardEvent) => {
     e.preventDefault();
+    setMessage('');
+    console.log('Paste event detected');
+    
     const items = e.clipboardData?.items;
     
-    if (!items) return;
+    if (!items) {
+      console.log('No clipboard items found');
+      return;
+    }
 
-    for (const item of Array.from(items)) {
+    console.log(`Found ${items.length} items in clipboard`);
+    
+    // Check for image content
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      console.log(`Clipboard item ${i}: type=${item.type}`);
+      
       if (item.type.startsWith('image/')) {
+        console.log('Found image in clipboard');
         const file = item.getAsFile();
-        if (!file) continue;
+        if (!file) {
+          console.log('Could not get file from clipboard item');
+          continue;
+        }
+
+        console.log(`Image file: size=${file.size}, type=${file.type}`);
 
         // Check file size (max 2MB)
         if (file.size > 2 * 1024 * 1024) {
@@ -52,20 +70,60 @@ const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, url, fish, o
           return;
         }
 
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          const base64String = event.target?.result as string;
-          setPreviewUrl(base64String);
+        try {
+          // Clear the URL field as we're using the pasted image
           setImageUrl('');
-          setMessage('');
-        };
-        reader.onerror = () => {
-          setMessage('Error reading pasted image');
-        };
-        reader.readAsDataURL(file);
-        break;
+          setMessage('Processing image...');
+          
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            try {
+              const result = event.target?.result;
+              if (!result || typeof result !== 'string') {
+                console.error('Invalid result from FileReader:', typeof result);
+                setMessage('Failed to read image data');
+                return;
+              }
+              
+              // Validate that it's a proper base64 image string
+              if (!result.startsWith('data:image/')) {
+                console.error('Invalid base64 format, does not start with data:image/', result.substring(0, 50));
+                setMessage('Invalid image format detected');
+                return;
+              }
+              
+              const mimeType = result.split(';')[0].split(':')[1];
+              console.log(`Base64 image loaded successfully! MIME type: ${mimeType}, size: ${Math.round(result.length / 1024)}KB`);
+              
+              // Set the preview with the validated base64 string
+              setPreviewUrl(result);
+              setMessage('Image ready - click Save to update');
+            } catch (validationError) {
+              console.error('Error validating pasted image:', validationError);
+              setMessage('Error processing pasted image');
+            }
+          };
+          
+          reader.onerror = (error) => {
+            console.error('Error reading pasted image:', error);
+            setMessage('Error reading pasted image');
+          };
+          
+          console.log('Reading file as DataURL...');
+          reader.readAsDataURL(file);
+          console.log('FileReader initiated');
+        } catch (error) {
+          console.error('Exception during file reading:', error);
+          setMessage('Failed to process pasted image');
+        }
+        
+        return; // Exit after processing the first image
       }
     }
+    
+    // If no image is found in the clipboard
+    console.log('No image found in clipboard');
+    setMessage('No image found in clipboard. Try copying an image first.');
   };
 
   const handleDrop = async (e: React.DragEvent) => {
@@ -130,42 +188,29 @@ const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, url, fish, o
   };
 
   const handleImageUpdate = async () => {
-    if (!imageUrl && !previewUrl) {
-      setMessage('Please enter an image URL or upload an image');
+    if (!fish) {
+      console.error('No fish selected');
+      return;
+    }
+
+    if (!onImageUpdate) {
+      console.error('No image update handler provided');
+      return;
+    }
+
+    if (!previewUrl) {
+      setMessage('Please paste or drop an image first');
       return;
     }
 
     try {
-      setLoading(true);
-      setMessage('');
-
-      if (!onImageUpdate) {
-        throw new Error('Image update handler not provided');
-      }
-
-      const imageToSave = previewUrl || imageUrl;
-      await onImageUpdate(fish.searchName, imageToSave);
-
-      setMessage('Image updated successfully!');
-      setPreviewUrl(null);
-      setImageUrl('');
-
-      // Close modal after a short delay
-      setTimeout(() => {
-        onClose();
-        // Restore scroll position after modal closes and content reflows
-        requestAnimationFrame(() => {
-          window.scrollTo({
-            top: scrollPositionRef.current,
-            behavior: 'instant'
-          });
-        });
-      }, 1500);
+      setMessage('Updating image...');
+      await onImageUpdate(fish.searchName, previewUrl);
+      setMessage('Image updated successfully');
+      onClose();
     } catch (error) {
       console.error('Error updating image:', error);
-      setMessage('Failed to update image. Please try again.');
-    } finally {
-      setLoading(false);
+      setMessage(error instanceof Error ? error.message : 'Failed to update image');
     }
   };
 
@@ -267,23 +312,13 @@ const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, url, fish, o
               )}
             </div>
 
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={imageUrl}
-                onChange={(e) => {
-                  setImageUrl(e.target.value);
-                  setPreviewUrl(null);
-                }}
-                placeholder="Or paste image URL here..."
-                className="flex-1 px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
+            <div className="flex justify-end">
               <button
                 onClick={handleImageUpdate}
-                disabled={loading || (!imageUrl && !previewUrl)}
+                disabled={!previewUrl}
                 className={`
                   flex items-center gap-2 px-6 py-2 rounded-lg font-medium
-                  ${loading || (!imageUrl && !previewUrl)
+                  ${!previewUrl
                     ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
                     : 'bg-green-500 text-white hover:bg-green-600'}
                   transition-colors

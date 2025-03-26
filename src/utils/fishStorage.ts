@@ -3,391 +3,492 @@ import { FishData } from '../types';
 import ImageCache from './imageCache';
 
 class FishStorage {
-  private static cache: Map<string, FishData[]> = new Map();
-  private static initialized = false;
-  private static BATCH_SIZE = 25;
-  private static PAGE_SIZE = 100;
-  private static IMAGE_BATCH_SIZE = 5;
-  private static MAX_RETRIES = 3;
-  private static RETRY_DELAY = 1000;
+  private static readonly PAGE_SIZE = 50;
+  private static readonly IMAGE_BATCH_SIZE = 50;
+  private static initialized: boolean = false;
+  private static progressCallback?: (loaded: number, total: number, stage?: 'database' | 'images') => void;
 
-  private static async initialize() {
-    if (this.initialized) return;
+  public static async initialize(progressCallback: (loaded: number, total: number, stage?: 'database' | 'images') => void): Promise<void> {
+    FishStorage.progressCallback = progressCallback;
     
-    const { error } = await supabase
-      .from('fish_data')
-      .select('id')
-      .limit(1)
-      .single();
+    if (FishStorage.initialized) {
+      console.log('FishStorage already initialized');
+      return;
+    }
 
-    if (error) throw error;
-    this.initialized = true;
-  }
+    console.log('Initializing FishStorage...');
+    try {
+      // Helper function to create a timeout promise
+      const timeout = (ms: number) => new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Connection timed out')), ms)
+      );
 
-  private static async loadFishImages(searchNames: string[]): Promise<Map<string, string>> {
-    const imageMap = new Map<string, string>();
-    
-    // Process search names in smaller batches
-    for (let i = 0; i < searchNames.length; i += this.IMAGE_BATCH_SIZE) {
-      const batch = searchNames.slice(i, i + this.IMAGE_BATCH_SIZE);
-      
-      let retries = 0;
-      let success = false;
+      // First check if we can connect to the fish_data table
+      try {
+        const { error: dataError } = await Promise.race([
+          supabase
+            .from('fish_data')
+            .select('id')
+            .limit(1),
+          timeout(5000) // 5 second timeout
+        ]) as { error: any };
 
-      while (retries < this.MAX_RETRIES && !success) {
-        try {
-          const { data: images, error } = await supabase
+        if (dataError) {
+          console.error('Error connecting to fish_data table:', dataError);
+          throw dataError;
+        }
+        console.log('Successfully connected to fish_data table');
+      } catch (error) {
+        console.error('Error connecting to fish_data table:', error);
+        throw error;
+      }
+
+      // Then check fish_images table
+      try {
+        const { error: imageError } = await Promise.race([
+          supabase
             .from('fish_images')
-            .select('search_name, image_url')
-            .in('search_name', batch)
-            .eq('user_id', '00000000-0000-0000-0000-000000000000');
+            .select('id')
+            .limit(1),
+          timeout(5000) // 5 second timeout
+        ]) as { error: any };
 
-          if (error) throw error;
-
-          if (images) {
-            images.forEach(img => {
-              const searchName = img.search_name.toUpperCase();
-              if (!imageMap.has(searchName)) {
-                imageMap.set(searchName, img.image_url);
-              }
-            });
-          }
-
-          success = true;
-
-        } catch (error) {
-          console.warn(`Attempt ${retries + 1} failed for batch ${i}:`, error);
-          retries++;
-          
-          if (retries < this.MAX_RETRIES) {
-            await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY * Math.pow(2, retries)));
-          }
+        if (imageError) {
+          // Log the error but don't throw - we can still function without images
+          console.warn('Warning: Error connecting to fish_images table:', imageError);
+        } else {
+          console.log('Successfully connected to fish_images table');
         }
+      } catch (error) {
+        // Log the error but don't throw - we can still function without images
+        console.warn('Warning: Error connecting to fish_images table:', error);
       }
 
-      if (!success) {
-        console.error(`Failed to load images for batch after ${this.MAX_RETRIES} attempts`);
-      }
-
-      // Add delay between batches to prevent rate limiting
-      if (i + this.IMAGE_BATCH_SIZE < searchNames.length) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
+      console.log('FishStorage initialized successfully');
+      FishStorage.initialized = true;
+    } catch (error) {
+      console.error('Failed to initialize FishStorage:', error);
+      const message = error instanceof Error ? error.message : 'Database connection error';
+      throw new Error(`Initialization failed: ${message}`);
     }
-
-    return imageMap;
   }
 
-  static async loadFishData(
-    onProgress?: (loaded: number, total: number) => void,
-    includeDisabled = false
-  ): Promise<FishData[]> {
-    try {
-      await this.initialize();
+  public static async loadFishData(): Promise<FishData[]> {
+    if (!FishStorage.initialized) {
+      throw new Error('FishStorage not initialized');
+    }
 
-      // Get total count
-      const { count: totalCount, error: countError } = await supabase
+    try {
+      console.log('Starting to load fish data...');
+      
+      // Get total count first
+      const { count, error: countError } = await supabase
         .from('fish_data')
-        .select('*', { count: 'exact' })
-        .is('archived', false);
+        .select('id', { count: 'exact', head: true });
 
-      if (countError) throw countError;
-
-      const total = totalCount || 0;
-      const fishData: FishData[] = [];
-      let offset = 0;
-
-      // Fetch data in pages
-      while (offset < total) {
-        // First get fish data
-        const { data: fishDataPage, error: fishError } = await supabase
-          .from('fish_data')
-          .select('*')
-          .is('archived', false)
-          .range(offset, offset + this.PAGE_SIZE - 1)
-          .order('order_index', { ascending: true });
-
-        if (fishError) throw fishError;
-        if (!fishDataPage || fishDataPage.length === 0) break;
-
-        // Get search names for this batch
-        const searchNames = fishDataPage.map(fish => fish.search_name.toUpperCase());
-        
-        // Get corresponding images in smaller batches
-        const imageMap = await this.loadFishImages(searchNames);
-
-        // Map fish data with images
-        const mappedFishData = fishDataPage.map(item => {
-          const searchName = item.search_name.toUpperCase();
-          const imageUrl = imageMap.get(searchName);
-
-          return {
-            id: item.id,
-            uniqueId: `fish-${item.id}`,
-            name: item.name,
-            searchName: searchName,
-            cost: item.cost,
-            category: item.category,
-            isCategory: item.is_category,
-            imageUrl: imageUrl,
-            searchUrl: `https://www.google.com/search?q=${encodeURIComponent(item.search_name + ' saltwater fish')}`,
-            disabled: item.disabled || false,
-            archived: item.archived || false,
-            originalCost: item.original_cost,
-            saleCost: item.sale_cost,
-            qtyoh: item.qtyoh || 0,
-            ebay_listing_id: item.ebay_listing_id,
-            ebay_listing_status: item.ebay_listing_status
-          };
-        });
-
-        fishData.push(...mappedFishData);
-
-        if (onProgress) {
-          onProgress(fishData.length, total);
-        }
-
-        offset += this.PAGE_SIZE;
-        await new Promise(resolve => setTimeout(resolve, 50));
+      if (countError) {
+        console.error('Error getting total count:', countError);
+        throw countError;
       }
 
-      // Cache the complete data
-      this.cache.set('fishData', fishData);
+      const total = count || 0;
+      console.log(`Found ${total} fish records`);
+      
+      if (total === 0) {
+        console.warn('No fish data found in database');
+        FishStorage.progressCallback?.(0, 0);
+        return [];
+      }
 
-      // Preload images in the background
-      ImageCache.preloadImages(fishData).catch(console.error);
+      // Report initial progress
+      FishStorage.progressCallback?.(0, total, 'database');
 
-      return fishData;
+      // Load all fish data in a single query
+      console.log('Loading fish data...');
+      const { data: fishData, error } = await supabase
+        .from('fish_data')
+        .select('*')
+        .order('name', { ascending: true });
 
+      if (error) {
+        console.error('Error loading fish data:', error);
+        throw error;
+      }
+
+      if (!fishData || fishData.length === 0) {
+        throw new Error('No fish data was loaded');
+      }
+
+      // Log all Clown Tang entries to debug
+      const clownTangs = fishData.filter(item => item.name.includes('CLOWN TANG'));
+      console.log('Found Clown Tang entries:', clownTangs);
+
+      // Convert fish data
+      const allFish = fishData.map(item => {
+        // Normalize search name for Clown Tang entries
+        let searchName = item.search_name;
+        if (item.name.includes('CLOWN TANG')) {
+          searchName = 'CLOWN TANG';  // Force the same search name for all Clown Tang entries
+          console.log(`Normalizing Clown Tang search name from ${item.search_name} to ${searchName}`);
+        }
+        const upperSearchName = searchName.toUpperCase();
+        console.log(`Processing fish: ${item.name}, original search_name: ${item.search_name}, normalized: ${upperSearchName}`);
+        return {
+          id: item.id,
+          uniqueId: `fish-${item.id}`,
+          name: item.name,
+          searchName: upperSearchName,
+          cost: item.cost,
+          category: item.category,
+          isCategory: item.is_category || false,
+          imageUrl: '', // Will be populated later
+          searchUrl: `https://www.google.com/search?q=${encodeURIComponent(searchName + ' saltwater fish')}`,
+          disabled: item.disabled || false,
+          archived: item.archived || false,
+          originalCost: item.original_cost,
+          saleCost: item.sale_cost,
+          qtyoh: item.qtyoh || 0,
+          ebay_listing_id: item.ebay_listing_id,
+          ebay_listing_status: item.ebay_listing_status
+        };
+      });
+
+      // Log all processed Clown Tang entries
+      const processedClownTangs = allFish.filter(item => item.name.includes('CLOWN TANG'));
+      console.log('Processed Clown Tang entries:', processedClownTangs);
+
+      // Report progress
+      FishStorage.progressCallback?.(allFish.length, total, 'database');
+
+      // Load images immediately
+      console.log('Loading images...');
+      await FishStorage.loadImagesInBackground(allFish);
+
+      return allFish;
     } catch (error) {
-      console.error('Error loading fish data:', error);
+      console.error('Error in loadFishData:', error);
       throw error;
     }
   }
 
-  static async saveFishData(fishData: FishData[]): Promise<void> {
+  private static async loadImagesInBackground(fishData: FishData[]): Promise<void> {
+    console.log('Starting background image loading...');
+    
+    // Reset the ImageCache request tracker to ensure we start fresh
+    ImageCache.resetRequestTracker();
+    
+    // Get unique search names and create a map to track which ones are loaded
+    const searchNames = [...new Set(fishData.map(fish => fish.searchName.toUpperCase()))];
+    const loadedSearchNames = new Set<string>();
+    console.log(`Found ${searchNames.length} unique search names to load images for`);
+    
     try {
-      await this.initialize();
+      // Reduced batch size and concurrency to prevent timeouts
+      const BATCH_SIZE = 10;
+      const CONCURRENT_BATCHES = 2;
+      const batches = [];
+      
+      for (let i = 0; i < searchNames.length; i += BATCH_SIZE) {
+        batches.push(searchNames.slice(i, i + BATCH_SIZE));
+      }
 
-      // Process in batches
-      for (let i = 0; i < fishData.length; i += this.BATCH_SIZE) {
-        const batch = fishData.slice(i, i + this.BATCH_SIZE);
+      const totalUniqueImages = searchNames.length;
+
+      // Process batches with retries
+      for (let i = 0; i < batches.length; i += CONCURRENT_BATCHES) {
+        const currentBatches = batches.slice(i, i + CONCURRENT_BATCHES);
         
-        for (const fish of batch) {
-          if (fish.isCategory) continue;
+        await Promise.all(currentBatches.map(async (searchNameBatch) => {
+          const MAX_RETRIES = 3;
+          let retryCount = 0;
+          
+          while (retryCount < MAX_RETRIES) {
+            try {
+              const { data: images, error } = await supabase
+                .from('fish_images')
+                .select('search_name, image_url')
+                .in('search_name', searchNameBatch);
 
-          try {
-            // Insert fish data
-            const { data: insertedData, error: insertError } = await supabase
-              .from('fish_data')
-              .insert({
-                name: fish.name,
-                search_name: fish.searchName.toUpperCase(),
-                cost: fish.cost,
-                category: fish.category,
-                is_category: false,
-                order_index: i,
-                disabled: false,
-                original_cost: fish.originalCost,
-                sale_cost: fish.saleCost,
-                qtyoh: fish.qtyoh || 0,
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString()
-              })
-              .select()
-              .single();
+              if (error) {
+                throw error;
+              }
 
-            if (insertError) {
-              // If insert fails due to duplicate, try update
-              const { error: updateError } = await supabase
-                .from('fish_data')
-                .update({
-                  name: fish.name,
-                  cost: fish.cost,
-                  category: fish.category,
-                  order_index: i,
-                  original_cost: fish.originalCost,
-                  sale_cost: fish.saleCost,
-                  qtyoh: fish.qtyoh || 0,
-                  updated_at: new Date().toISOString()
-                })
-                .eq('search_name', fish.searchName.toUpperCase());
+              if (!images || images.length === 0) {
+                console.log(`No images found for batch with ${searchNameBatch.length} names`);
+                return;
+              }
 
-              if (updateError) throw updateError;
+              // Create a map for faster lookups
+              const imageMap = new Map(
+                images.map(img => [img.search_name.toUpperCase(), img.image_url])
+              );
+
+              // Apply images to all matching fish in one pass
+              fishData.forEach(fish => {
+                const imageUrl = imageMap.get(fish.searchName.toUpperCase());
+                if (imageUrl) {
+                  fish.imageUrl = imageUrl;
+                  // Only count each unique search name once
+                  if (!loadedSearchNames.has(fish.searchName.toUpperCase())) {
+                    loadedSearchNames.add(fish.searchName.toUpperCase());
+                    // Update progress with unique images loaded and stage
+                    FishStorage.progressCallback?.(loadedSearchNames.size, totalUniqueImages, 'images');
+                  }
+                }
+              });
+
+              break; // Success, exit retry loop
+              
+            } catch (error) {
+              retryCount++;
+              console.error(`Error processing batch (attempt ${retryCount}/${MAX_RETRIES}):`, error);
+              
+              if (retryCount === MAX_RETRIES) {
+                console.error(`Failed to load images for batch after ${MAX_RETRIES} attempts`);
+                return;
+              }
+              
+              // Exponential backoff between retries
+              await new Promise(resolve => setTimeout(resolve, Math.pow(2, retryCount) * 100));
             }
-
-          } catch (error) {
-            console.error(`Error processing fish "${fish.name}":`, error);
-            continue;
           }
-        }
+        }));
 
-        // Add delay between batches
-        if (i + this.BATCH_SIZE < fishData.length) {
-          await new Promise(resolve => setTimeout(resolve, 100));
+        // Larger delay between batch sets to prevent overwhelming
+        if (i + CONCURRENT_BATCHES < batches.length) {
+          await new Promise(resolve => setTimeout(resolve, 200));
         }
       }
 
-      // Clear caches
-      this.clearCache();
-      ImageCache.clear();
-
+      // Preload images for display
+      const fishWithImages = fishData.filter(fish => fish.imageUrl);
+      if (fishWithImages.length > 0) {
+        console.log(`Preloading ${fishWithImages.length} images...`);
+        await ImageCache.preloadImages(fishWithImages, (loaded: number, total: number) => {
+          console.log(`Image loading progress: ${loaded}/${total}`);
+          FishStorage.progressCallback?.(loaded, total, 'images');
+        });
+      }
     } catch (error) {
-      console.error('Error saving fish data:', error);
-      throw error;
+      console.error('Error in loadImagesInBackground:', error);
+      FishStorage.progressCallback?.(0, 0);
     }
   }
 
-  static async updateCategoryStatus(category: string, disabled: boolean): Promise<void> {
-    try {
-      await this.initialize();
+  public static async updateCategoryStatus(category: string, disabled: boolean): Promise<void> {
+    if (!FishStorage.initialized) {
+      throw new Error('FishStorage not initialized');
+    }
 
+    try {
+      console.log(`Updating category status: ${category} (disabled: ${disabled})`);
+      
       const { error } = await supabase
         .from('fish_data')
-        .update({ 
-          disabled,
-          updated_at: new Date().toISOString()
-        })
-        .eq('category', category);
+        .update({ disabled })
+        .eq('category', category)
+        .eq('is_category', false);
 
-      if (error) throw error;
-
-      this.clearCache();
-    } catch (error) {
-      console.error('Error updating category status:', error);
-      throw error;
-    }
-  }
-
-  static async deleteItem(fishId: string): Promise<void> {
-    try {
-      await this.initialize();
-
-      // Check if item is referenced in orders
-      const { data: orderItems, error: checkError } = await supabase
-        .from('order_items')
-        .select('id')
-        .eq('fish_id', fishId)
-        .limit(1);
-
-      if (checkError) throw checkError;
-
-      if (orderItems && orderItems.length > 0) {
-        // Archive if referenced
-        const { error: archiveError } = await supabase
-          .from('fish_data')
-          .update({ 
-            archived: true,
-            archived_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', fishId);
-
-        if (archiveError) throw archiveError;
-      } else {
-        // Delete if not referenced
-        const { error: deleteError } = await supabase
-          .from('fish_data')
-          .delete()
-          .eq('id', fishId);
-
-        if (deleteError) throw deleteError;
+      if (error) {
+        console.error('Error updating category status:', error);
+        throw error;
       }
 
-      // Clear caches
-      this.clearCache();
-      ImageCache.clear();
-
+      console.log(`Successfully updated category status: ${category}`);
     } catch (error) {
-      console.error('Error deleting item:', error);
+      console.error('Error in updateCategoryStatus:', error);
       throw error;
     }
   }
 
-  static async clearAllData(onProgress?: (current: number, total: number) => void): Promise<void> {
-    try {
-      await this.initialize();
+  public static async updateItemStatus(id: string, disabled: boolean): Promise<void> {
+    if (!FishStorage.initialized) {
+      throw new Error('FishStorage not initialized');
+    }
 
-      // Get all fish IDs
-      const { data: allFish, error: fishError } = await supabase
+    try {
+      console.log(`Updating item status: ${id} (disabled: ${disabled})`);
+      
+      const { error } = await supabase
         .from('fish_data')
-        .select('id');
+        .update({ disabled })
+        .eq('id', id);
 
-      if (fishError) throw fishError;
-      if (!allFish?.length) return;
-
-      // Get referenced fish IDs
-      const { data: orderItems, error: orderError } = await supabase
-        .from('order_items')
-        .select('fish_id')
-        .not('fish_id', 'is', null);
-
-      if (orderError) throw orderError;
-
-      // Create a Set of referenced IDs
-      const referencedIds = new Set(orderItems?.map(item => item.fish_id) || []);
-
-      // Separate fish into referenced and non-referenced
-      const nonReferencedIds = allFish
-        .filter(fish => !referencedIds.has(fish.id))
-        .map(fish => fish.id);
-
-      const total = nonReferencedIds.length + referencedIds.size;
-      let processed = 0;
-
-      // Delete non-referenced fish in batches
-      for (let i = 0; i < nonReferencedIds.length; i += this.BATCH_SIZE) {
-        const batchIds = nonReferencedIds.slice(i, i + this.BATCH_SIZE);
-
-        const { error: deleteError } = await supabase
-          .from('fish_data')
-          .delete()
-          .in('id', batchIds);
-
-        if (deleteError) throw deleteError;
-
-        processed += batchIds.length;
-        if (onProgress) {
-          onProgress(processed, total);
-        }
-
-        if (i + this.BATCH_SIZE < nonReferencedIds.length) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
+      if (error) {
+        console.error('Error updating item status:', error);
+        throw error;
       }
 
-      // Archive referenced fish
-      if (referencedIds.size > 0) {
-        const { error: archiveError } = await supabase
-          .from('fish_data')
-          .update({
-            archived: true,
-            archived_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
-          })
-          .in('id', Array.from(referencedIds));
-
-        if (archiveError) throw archiveError;
-
-        processed += referencedIds.size;
-        if (onProgress) {
-          onProgress(processed, total);
-        }
-      }
-
-      // Clear caches
-      this.clearCache();
-      ImageCache.clear();
-
+      console.log(`Successfully updated item status: ${id}`);
     } catch (error) {
-      console.error('Error clearing data:', error);
+      console.error('Error in updateItemStatus:', error);
       throw error;
     }
   }
 
-  static clearCache() {
-    this.cache.clear();
-    this.initialized = false;
+  public static async deleteItem(id: string): Promise<void> {
+    if (!FishStorage.initialized) {
+      throw new Error('FishStorage not initialized');
+    }
+
+    try {
+      console.log(`Deleting item: ${id}`);
+      
+      const { error } = await supabase
+        .from('fish_data')
+        .delete()
+        .eq('id', id);
+
+      if (error) {
+        console.error('Error deleting item:', error);
+        throw error;
+      }
+
+      console.log(`Successfully deleted item: ${id}`);
+    } catch (error) {
+      console.error('Error in deleteItem:', error);
+      throw error;
+    }
+  }
+
+  public static async saveFishData(fishData: FishData[]): Promise<void> {
+    if (!FishStorage.initialized) {
+      throw new Error('FishStorage not initialized');
+    }
+
+    try {
+      console.log('Saving fish data...');
+      
+      // First, clear existing data
+      const { error: deleteError } = await supabase
+        .from('fish_data')
+        .delete()
+        .neq('id', 'dummy'); // Delete all records
+
+      if (deleteError) {
+        console.error('Error clearing existing data:', deleteError);
+        throw deleteError;
+      }
+
+      // Then insert new data
+      const { error: insertError } = await supabase
+        .from('fish_data')
+        .insert(fishData.map(fish => ({
+          name: fish.name,
+          search_name: fish.searchName,
+          cost: fish.cost,
+          category: fish.category,
+          is_category: fish.isCategory || false,
+          disabled: fish.disabled || false,
+          archived: fish.archived || false,
+          original_cost: fish.originalCost,
+          sale_cost: fish.saleCost,
+          qtyoh: fish.qtyoh || 0,
+          ebay_listing_id: fish.ebay_listing_id,
+          ebay_listing_status: fish.ebay_listing_status
+        })));
+
+      if (insertError) {
+        console.error('Error inserting new data:', insertError);
+        throw insertError;
+      }
+
+      console.log(`Successfully saved ${fishData.length} fish records`);
+    } catch (error) {
+      console.error('Error in saveFishData:', error);
+      throw error;
+    }
+  }
+
+  public static async normalizeSearchNames(): Promise<void> {
+    if (!FishStorage.initialized) {
+      throw new Error('FishStorage not initialized');
+    }
+
+    try {
+      console.log('Normalizing search names for Clown Tang entries...');
+      
+      // Update all Clown Tang entries to use the same search name
+      const { error } = await supabase
+        .from('fish_data')
+        .update({ search_name: 'CLOWN TANG' })
+        .like('name', '%CLOWN TANG%');
+
+      if (error) {
+        console.error('Error normalizing search names:', error);
+        throw error;
+      }
+
+      // Also update the fish_images table
+      const { error: imageError } = await supabase
+        .from('fish_images')
+        .update({ search_name: 'CLOWN TANG' })
+        .like('search_name', '%CLOWN TANG%');
+
+      if (imageError) {
+        console.error('Error normalizing image search names:', imageError);
+        throw imageError;
+      }
+
+      console.log('Successfully normalized search names');
+    } catch (error) {
+      console.error('Error in normalizeSearchNames:', error);
+      throw error;
+    }
+  }
+
+  public static async clearAllData(progressCallback?: (current: number, total: number) => void): Promise<void> {
+    if (!FishStorage.initialized) {
+      throw new Error('FishStorage not initialized');
+    }
+
+    try {
+      console.log('Clearing all data...');
+      
+      // Get total count first
+      const { count, error: countError } = await supabase
+        .from('fish_data')
+        .select('id', { count: 'exact', head: true });
+
+      if (countError) {
+        console.error('Error getting total count:', countError);
+        throw countError;
+      }
+
+      const total = count || 0;
+      console.log(`Found ${total} records to delete`);
+      
+      if (total === 0) {
+        console.log('No records to delete');
+        return;
+      }
+
+      // Delete in batches
+      const batchSize = 100;
+      const batches = Math.ceil(total / batchSize);
+      let deleted = 0;
+
+      for (let i = 0; i < batches; i++) {
+        const { error } = await supabase
+          .from('fish_data')
+          .delete()
+          .neq('id', 'dummy')
+          .limit(batchSize);
+
+        if (error) {
+          console.error('Error deleting batch:', error);
+          throw error;
+        }
+
+        deleted += batchSize;
+        progressCallback?.(Math.min(deleted, total), total);
+      }
+
+      console.log(`Successfully cleared ${deleted} records`);
+    } catch (error) {
+      console.error('Error in clearAllData:', error);
+      throw error;
+    }
   }
 }
 
