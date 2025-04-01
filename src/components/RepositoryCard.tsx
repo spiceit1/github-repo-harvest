@@ -11,8 +11,8 @@ interface RepositoryCardProps {
 
 const RepositoryCard: React.FC<RepositoryCardProps> = ({ repository }) => {
   return (
-    <Link to={`/repository/${repository.full_name}`} className="block">
-      <div className="bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md transition-shadow p-4">
+    <Link to={`/repository/${repository.owner.login}/${repository.name}`} className="block">
+      <div className="bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md transition-shadow p-4 h-full">
         <div className="flex items-center mb-3">
           <img 
             src={repository.owner.avatar_url} 
