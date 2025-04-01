@@ -84,7 +84,8 @@ class FishStorage {
       // Get total count first
       const { count, error: countError } = await supabase
         .from('fish_data')
-        .select('id', { count: 'exact', head: true });
+        .select('id', { count: 'exact', head: true })
+        .eq('archived', false); // Only count non-archived fish
 
       if (countError) {
         console.error('Error getting total count:', countError);
@@ -92,7 +93,7 @@ class FishStorage {
       }
 
       const total = count || 0;
-      console.log(`Found ${total} fish records`);
+      console.log(`Found ${total} active fish records`);
       
       if (total === 0) {
         console.warn('No fish data found in database');
@@ -108,6 +109,7 @@ class FishStorage {
       const { data: fishData, error } = await supabase
         .from('fish_data')
         .select('*')
+        .eq('archived', false) // Only load non-archived fish
         .order('name', { ascending: true });
 
       if (error) {
@@ -171,16 +173,24 @@ class FishStorage {
     }
   }
 
-  private static async loadImagesInBackground(fishData: FishData[]): Promise<void> {
+  private static async loadImagesInBackground(fishData: FishData[], includeDisabled: boolean = false): Promise<void> {
     console.log('Starting background image loading...');
     
     // Reset the ImageCache request tracker to ensure we start fresh
     ImageCache.resetRequestTracker();
     
-    // Get unique search names and create a map to track which ones are loaded
-    const searchNames = [...new Set(fishData.map(fish => fish.searchName.toUpperCase()))];
+    // Get unique search names based on the includeDisabled parameter
+    const searchNames = [...new Set(fishData
+      .filter(fish => {
+        if (includeDisabled) {
+          return fish.disabled && !fish.archived; // Only load disabled, non-archived items
+        }
+        return !fish.disabled && !fish.archived; // Only load active, non-archived items
+      })
+      .map(fish => fish.searchName.toUpperCase())
+    )];
     const loadedSearchNames = new Set<string>();
-    console.log(`Found ${searchNames.length} unique search names to load images for`);
+    console.log(`Found ${searchNames.length} unique search names to load images for ${includeDisabled ? 'disabled' : 'active'} items`);
     
     try {
       // Reduced batch size and concurrency to prevent timeouts
@@ -223,55 +233,72 @@ class FishStorage {
                 images.map(img => [img.search_name.toUpperCase(), img.image_url])
               );
 
-              // Apply images to all matching fish in one pass
-              fishData.forEach(fish => {
-                const imageUrl = imageMap.get(fish.searchName.toUpperCase());
-                if (imageUrl) {
-                  fish.imageUrl = imageUrl;
-                  // Only count each unique search name once
-                  if (!loadedSearchNames.has(fish.searchName.toUpperCase())) {
-                    loadedSearchNames.add(fish.searchName.toUpperCase());
-                    // Update progress with unique images loaded and stage
-                    FishStorage.progressCallback?.(loadedSearchNames.size, totalUniqueImages, 'images');
+              // Apply images based on the includeDisabled parameter
+              fishData
+                .filter(fish => {
+                  if (includeDisabled) {
+                    return fish.disabled && !fish.archived;
                   }
-                }
-              });
+                  return !fish.disabled && !fish.archived;
+                })
+                .forEach(fish => {
+                  const imageUrl = imageMap.get(fish.searchName.toUpperCase());
+                  if (imageUrl) {
+                    fish.imageUrl = imageUrl;
+                    if (!loadedSearchNames.has(fish.searchName.toUpperCase())) {
+                      loadedSearchNames.add(fish.searchName.toUpperCase());
+                      FishStorage.progressCallback?.(loadedSearchNames.size, totalUniqueImages, 'images');
+                    }
+                  }
+                });
 
               break; // Success, exit retry loop
-              
             } catch (error) {
+              console.error(`Error loading images (attempt ${retryCount + 1}):`, error);
               retryCount++;
-              console.error(`Error processing batch (attempt ${retryCount}/${MAX_RETRIES}):`, error);
-              
               if (retryCount === MAX_RETRIES) {
-                console.error(`Failed to load images for batch after ${MAX_RETRIES} attempts`);
-                return;
+                throw error;
               }
-              
-              // Exponential backoff between retries
-              await new Promise(resolve => setTimeout(resolve, Math.pow(2, retryCount) * 100));
+              // Exponential backoff
+              await new Promise(resolve => setTimeout(resolve, Math.pow(2, retryCount) * 1000));
             }
           }
         }));
 
-        // Larger delay between batch sets to prevent overwhelming
-        if (i + CONCURRENT_BATCHES < batches.length) {
-          await new Promise(resolve => setTimeout(resolve, 200));
-        }
+        // Report progress after each batch
+        FishStorage.progressCallback?.(
+          Math.min(loadedSearchNames.size, totalUniqueImages),
+          totalUniqueImages,
+          'images'
+        );
       }
 
       // Preload images for display
-      const fishWithImages = fishData.filter(fish => fish.imageUrl);
-      if (fishWithImages.length > 0) {
-        console.log(`Preloading ${fishWithImages.length} images...`);
-        await ImageCache.preloadImages(fishWithImages, (loaded: number, total: number) => {
-          console.log(`Image loading progress: ${loaded}/${total}`);
-          FishStorage.progressCallback?.(loaded, total, 'images');
-        });
-      }
+      const loadedUrls = Array.from(loadedSearchNames)
+        .map(name => fishData.find(fish => fish.searchName === name)?.imageUrl)
+        .filter((url): url is string => !!url);
+
+      await ImageCache.preloadImages(fishData.filter(fish => fish.imageUrl && loadedUrls.includes(fish.imageUrl)));
+
+      console.log(`Finished loading ${loadedSearchNames.size} images`);
     } catch (error) {
       console.error('Error in loadImagesInBackground:', error);
-      FishStorage.progressCallback?.(0, 0);
+      throw error;
+    }
+  }
+
+  // Add a new public method to load disabled item images
+  public static async loadDisabledItemImages(fishData: FishData[]): Promise<void> {
+    if (!FishStorage.initialized) {
+      throw new Error('FishStorage not initialized');
+    }
+
+    try {
+      console.log('Loading images for disabled items...');
+      await FishStorage.loadImagesInBackground(fishData, true);
+    } catch (error) {
+      console.error('Error loading disabled item images:', error);
+      throw error;
     }
   }
 
@@ -357,46 +384,71 @@ class FishStorage {
     }
 
     try {
-      console.log('Saving fish data...');
+      console.log('Starting fish data save process...');
       
-      // First, clear existing data
-      const { error: deleteError } = await supabase
+      // First, mark all existing records as archived instead of deleting them
+      console.log('Archiving existing data...');
+      const { error: archiveError } = await supabase
         .from('fish_data')
-        .delete()
-        .neq('id', 'dummy'); // Delete all records
+        .update({ archived: true })
+        .not('id', 'is', null);
 
-      if (deleteError) {
-        console.error('Error clearing existing data:', deleteError);
-        throw deleteError;
+      if (archiveError) {
+        console.error('Error archiving existing data:', archiveError);
+        throw new Error(`Failed to archive existing data: ${archiveError.message}`);
       }
 
-      // Then insert new data
-      const { error: insertError } = await supabase
-        .from('fish_data')
-        .insert(fishData.map(fish => ({
-          name: fish.name,
-          search_name: fish.searchName,
-          cost: fish.cost,
-          category: fish.category,
-          is_category: fish.isCategory || false,
-          disabled: fish.disabled || false,
-          archived: fish.archived || false,
-          original_cost: fish.originalCost,
-          sale_cost: fish.saleCost,
-          qtyoh: fish.qtyoh || 0,
-          ebay_listing_id: fish.ebay_listing_id,
-          ebay_listing_status: fish.ebay_listing_status
-        })));
+      console.log(`Processing ${fishData.length} new fish records...`);
+      let processed = 0;
+      let errors = [];
 
-      if (insertError) {
-        console.error('Error inserting new data:', insertError);
-        throw insertError;
+      // Process in batches to avoid overwhelming the database
+      const batchSize = 50;
+      for (let i = 0; i < fishData.length; i += batchSize) {
+        const batch = fishData.slice(i, i + batchSize);
+        console.log(`Processing batch ${i / batchSize + 1} of ${Math.ceil(fishData.length / batchSize)}`);
+
+        // Insert batch of new records
+        const { error: insertError } = await supabase
+          .from('fish_data')
+          .insert(batch.map(fish => ({
+            name: fish.name,
+            search_name: fish.searchName,
+            cost: fish.cost,
+            category: fish.category,
+            is_category: fish.isCategory || false,
+            disabled: fish.disabled || false,
+            original_cost: fish.originalCost,
+            sale_cost: fish.saleCost,
+            qtyoh: fish.qtyoh || 0,
+            ebay_listing_id: fish.ebay_listing_id,
+            ebay_listing_status: fish.ebay_listing_status,
+            archived: false
+          })));
+
+        if (insertError) {
+          console.error(`Error inserting batch:`, insertError);
+          errors.push({ batch: i / batchSize + 1, error: insertError.message });
+          continue;
+        }
+
+        processed += batch.length;
       }
 
-      console.log(`Successfully saved ${fishData.length} fish records`);
+      console.log(`Processed ${processed} out of ${fishData.length} fish records`);
+      if (errors.length > 0) {
+        console.error('Errors during processing:', errors);
+        throw new Error(`Failed to process ${errors.length} batches. Check console for details.`);
+      }
+
+      if (processed === 0) {
+        throw new Error('No fish records were processed successfully');
+      }
+
+      console.log('Fish data save process completed successfully');
     } catch (error) {
       console.error('Error in saveFishData:', error);
-      throw error;
+      throw error instanceof Error ? error : new Error('Failed to save fish data');
     }
   }
 
@@ -488,6 +540,74 @@ class FishStorage {
     } catch (error) {
       console.error('Error in clearAllData:', error);
       throw error;
+    }
+  }
+
+  public static async clearAllFishData(): Promise<void> {
+    if (!FishStorage.initialized) {
+      throw new Error('FishStorage not initialized');
+    }
+
+    try {
+      console.log('Starting fish data wipe process...');
+      
+      // First, get all fish_ids that are referenced in order_items
+      const { data: referencedIds, error: referencedError } = await supabase
+        .from('order_items')
+        .select('fish_id')
+        .not('fish_id', 'is', null);
+
+      if (referencedError) {
+        console.error('Error getting referenced fish IDs:', referencedError);
+        throw new Error(`Failed to get referenced fish IDs: ${referencedError.message}`);
+      }
+
+      // Get the array of referenced IDs, or empty array if none found
+      const referencedIdArray = (referencedIds || []).map(item => item.fish_id);
+      
+      if (referencedIdArray.length > 0) {
+        // Delete all fish_data records that are NOT referenced in order_items
+        const { error: deleteError } = await supabase
+          .from('fish_data')
+          .delete()
+          .not('id', 'in', `(${referencedIdArray.join(',')})`);
+
+        if (deleteError) {
+          console.error('Error deleting unreferenced fish data:', deleteError);
+          throw new Error(`Failed to delete unreferenced fish data: ${deleteError.message}`);
+        }
+
+        // For referenced records, mark them as disabled instead of deleting
+        const { error: disableError } = await supabase
+          .from('fish_data')
+          .update({ disabled: true })
+          .in('id', referencedIdArray);
+
+        if (disableError) {
+          console.error('Error disabling referenced fish data:', disableError);
+          throw new Error(`Failed to disable referenced fish data: ${disableError.message}`);
+        }
+
+        console.log('Fish data wipe completed successfully');
+        console.log(`- Disabled ${referencedIdArray.length} referenced records`);
+      } else {
+        // If no referenced IDs, delete all records
+        const { error: deleteAllError } = await supabase
+          .from('fish_data')
+          .delete()
+          .not('id', 'is', null);
+
+        if (deleteAllError) {
+          console.error('Error deleting all fish data:', deleteAllError);
+          throw new Error(`Failed to delete all fish data: ${deleteAllError.message}`);
+        }
+
+        console.log('Fish data wipe completed successfully');
+        console.log('- Deleted all records (no referenced records found)');
+      }
+    } catch (error) {
+      console.error('Error in clearAllFishData:', error);
+      throw error instanceof Error ? error : new Error('Failed to clear fish data');
     }
   }
 }

@@ -160,7 +160,9 @@ const CheckoutController: React.FC<CheckoutControllerProps> = ({ items, onComple
         .from('orders')
         .insert({
           user_id: user?.id || GUEST_USER_ID,
-          status: 'pending',
+          status: data.paypalOrderId ? 'completed' : 'pending',
+          payment_provider: data.paypalOrderId ? 'paypal' : 'credit_card',
+          payment_id: data.paypalOrderId || null,
           shipping_address: {
             ...shippingData,
             email: isGuest ? guestEmail : user?.email
@@ -192,7 +194,7 @@ const CheckoutController: React.FC<CheckoutControllerProps> = ({ items, onComple
 
       if (itemsError) throw itemsError;
 
-      if (data.saveCard && user) {
+      if (!data.paypalOrderId && data.saveCard && user) {
         const { error: cardError } = await supabase
           .from('payment_methods')
           .insert({
@@ -207,10 +209,6 @@ const CheckoutController: React.FC<CheckoutControllerProps> = ({ items, onComple
       }
 
       setOrderNumber(order.order_number);
-      setPaymentMethod({
-        brand: 'Visa',
-        last4: data.cardNumber.slice(-4)
-      });
       
       // Clear the cart after successful order creation
       onComplete();
@@ -327,6 +325,72 @@ const CheckoutController: React.FC<CheckoutControllerProps> = ({ items, onComple
             </div>
 
             <PaymentForm
+              items={items}
+              total={calculateTotal().total}
+              onPayPalSuccess={async (details) => {
+                try {
+                  console.log('PayPal payment completed:', details);
+                  
+                  // Set payment method for PayPal
+                  setPaymentMethod({
+                    brand: 'PayPal',
+                    last4: details.purchase_units?.[0]?.payee?.email_address || 'PayPal'
+                  });
+
+                  // Create order in database
+                  const { data: { user } } = await supabase.auth.getUser();
+                  
+                  const { data: order, error: orderError } = await supabase
+                    .from('orders')
+                    .insert({
+                      user_id: user?.id || GUEST_USER_ID,
+                      status: 'completed',
+                      payment_provider: 'paypal',
+                      payment_id: details.id,
+                      shipping_address: {
+                        ...shippingData,
+                        email: isGuest ? guestEmail : user?.email
+                      },
+                      billing_address: useSameAddress ? {
+                        ...shippingData,
+                        email: isGuest ? guestEmail : user?.email
+                      } : billingAddress,
+                      total_amount: calculateTotal().total,
+                      shipping_option_id: null,
+                      guest_email: isGuest ? guestEmail : null
+                    })
+                    .select()
+                    .single();
+
+                  if (orderError) throw orderError;
+
+                  const orderItems = items.map(item => ({
+                    order_id: order.id,
+                    fish_id: item.fish.id,
+                    quantity: item.quantity,
+                    price_at_time: item.fish.saleCost || 0,
+                    name_at_time: item.fish.name
+                  }));
+
+                  const { error: itemsError } = await supabase
+                    .from('order_items')
+                    .insert(orderItems);
+
+                  if (itemsError) throw itemsError;
+
+                  // Set order details and move to confirmation
+                  setOrderNumber(order.order_number);
+                  onComplete();
+                  setCurrentStep('confirmation');
+                } catch (error) {
+                  console.error('Error processing PayPal payment:', error);
+                  setError('Failed to process PayPal payment. Please try again.');
+                }
+              }}
+              onPayPalError={(error) => {
+                console.error('PayPal error:', error);
+                setError('Failed to process PayPal payment. Please try again.');
+              }}
               onSubmit={handlePaymentSubmit}
               savedCards={!isGuest ? savedCards : []}
               shippingAddress={shippingData!}

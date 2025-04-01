@@ -178,9 +178,7 @@ const StatsDisplay: React.FC<StatsProps> = ({ fishData, onToggleCategory, onCate
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              if (window.confirm(`Are you sure you want to ${category.status === 'active' ? 'disable' : 'enable'} all items in this category?`)) {
-                                onToggleCategory(category.name, category.status === 'active');
-                              }
+                              onToggleCategory(category.name, category.status === 'active');
                             }}
                             className={`p-1 rounded ${
                               category.status === 'active'

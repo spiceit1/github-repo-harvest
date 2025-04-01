@@ -333,11 +333,7 @@ const FishCard: React.FC<FishCardProps> = ({
               </button>
               {onDelete && (
                 <button
-                  onClick={() => {
-                    if (window.confirm('Are you sure you want to delete this item? This action cannot be undone.')) {
-                      onDelete();
-                    }
-                  }}
+                  onClick={onDelete}
                   className="text-sm flex items-center gap-1 text-red-600 hover:text-red-700"
                 >
                   <Trash2 className="h-4 w-4" />
