@@ -8,7 +8,7 @@ interface PaymentFormData {
   savedCardId?: string;
   saveCard?: boolean;
   paymentMethod: 'card' | 'paypal';
-  paypalOrderId?: string; // Add the missing property
+  paypalOrderId?: string;
 }
 
 interface ShippingFormData {
@@ -32,8 +32,8 @@ interface PaymentFormProps {
   shippingAddress: ShippingFormData;
   showSaveCard: boolean;
   onSaveCard: (data: any) => Promise<void>;
-  items: CartItem[]; // Add this missing property
-  total: number; // Add this missing property
+  items: CartItem[];
+  total: number;
 }
 
 interface CartItem {

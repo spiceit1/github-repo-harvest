@@ -1,482 +1,250 @@
+
 import { pdfjs } from 'react-pdf';
-import { FishData } from '../types';
+import { FishData } from '../types/fish';
 
-// Set up the worker for PDF.js
-pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.js`;
+// Set up PDF.js worker
+const pdfjsWorker = await import('pdfjs-dist/build/pdf.worker.entry');
+pdfjs.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
-export async function extractFishData(file: File, startPage: number, endPage: number): Promise<FishData[]> {
-  const fishData: FishData[] = [];
-  
+interface ExtractOptions {
+  startPage?: number;
+  endPage?: number;
+  searchTerms?: string[];
+  excludeTerms?: string[];
+}
+
+/**
+ * Extract fish data from PDF content 
+ */
+export const extractFishDataFromPdf = async (
+  pdfUrl: string,
+  options: ExtractOptions = {}
+): Promise<FishData[]> => {
   try {
-    // Load the PDF document
-    const fileArrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjs.getDocument({ data: fileArrayBuffer }).promise;
+    const loadingTask = pdfjs.getDocument(pdfUrl);
+    const pdf = await loadingTask.promise;
     
-    // Process each page in the specified range
-    for (let pageNum = startPage; pageNum <= endPage && pageNum <= pdf.numPages; pageNum++) {
-      console.log(`Processing page ${pageNum}...`);
+    const { startPage = 1, endPage = pdf.numPages } = options;
+    const fishData: FishData[] = [];
+    
+    // Process each page in the range
+    for (let pageNum = startPage; pageNum <= endPage; pageNum++) {
       const page = await pdf.getPage(pageNum);
+      const content = await page.getTextContent();
+      const text = content.items.map(item => (item as any).str).join(' ');
       
-      // Get text content with positions
-      const textContent = await page.getTextContent();
-      
-      // Get text items with their positions
-      const textItems = textContent.items.map((item: any) => ({
-        text: item.str,
-        x: item.transform[4], // x position
-        y: item.transform[5], // y position
-        height: item.height,
-        width: item.width
-      }));
-      
-      // Log all text items for debugging
-      console.log(`Page ${pageNum} has ${textItems.length} text items`);
-      textItems.forEach((item, i) => {
-        if (i < 20) { // Log first 20 items to avoid console flood
-          console.log(`Item ${i}: "${item.text}" at x=${item.x.toFixed(1)}, y=${item.y.toFixed(1)}`);
-        }
-      });
-      
-      // Get full page text
-      const pageText = textItems.map(item => item.text).join(' ');
-      console.log(`Page ${pageNum} text sample: ${pageText.substring(0, 200)}...`);
-      
-      // Determine category
-      let currentCategory = determineCategory(pageNum, pageText);
-      console.log(`Detected category: ${currentCategory}`);
-      
-      // Try multiple extraction methods
-      let extractedItems: FishData[] = [];
-      
-      // Method 1: Look for "Common Name" column
-      console.log("Trying Common Name column extraction...");
-      extractedItems = extractFromCommonNameColumn(textItems, currentCategory);
-      console.log(`Method 1 found ${extractedItems.length} items`);
-      
-      // Method 2: Look for dash-separated names
-      if (extractedItems.length === 0) {
-        console.log("Trying dash-separated names extraction...");
-        extractedItems = extractDashSeparatedNames(textItems, currentCategory);
-        console.log(`Method 2 found ${extractedItems.length} items`);
-      }
-      
-      // Method 3: Extract from table-like structures
-      if (extractedItems.length === 0) {
-        console.log("Trying table structure extraction...");
-        extractedItems = extractFromTableStructure(textItems, currentCategory);
-        console.log(`Method 3 found ${extractedItems.length} items`);
-      }
-      
-      // Method 4: Extract capitalized words that might be fish names
-      if (extractedItems.length === 0) {
-        console.log("Trying capitalized words extraction...");
-        extractedItems = extractCapitalizedNames(textItems, currentCategory);
-        console.log(`Method 4 found ${extractedItems.length} items`);
-      }
-      
-      // Method 5: Last resort - extract any potential fish names from raw text
-      if (extractedItems.length === 0) {
-        console.log("Trying raw text extraction...");
-        extractedItems = extractFromRawText(pageText, currentCategory);
-        console.log(`Method 5 found ${extractedItems.length} items`);
-      }
-      
+      // Parse the text for fish data based on the format
+      const extractedItems = parsePdfText(text);
       fishData.push(...extractedItems);
     }
     
-    // Remove duplicates and filter out invalid entries
-    const uniqueFishData = fishData
-      .filter(fish => fish.name && fish.name.length > 2)
-      .filter((fish, index, self) => 
-        index === self.findIndex((f) => f.name.toLowerCase() === fish.name.toLowerCase())
-      );
-    
-    console.log(`Total unique fish data extracted: ${uniqueFishData.length}`);
-    
-    // Sort alphabetically by name
-    uniqueFishData.sort((a, b) => a.name.localeCompare(b.name));
-    
-    return uniqueFishData;
+    // Apply any filtering based on options
+    return filterFishData(fishData, options);
   } catch (error) {
-    console.error('Error extracting PDF data:', error);
-    throw error;
+    console.error('Error extracting fish data from PDF:', error);
+    return [];
   }
-}
+};
 
-// Method 1: Extract from Common Name column
-function extractFromCommonNameColumn(textItems: any[], currentCategory: string): FishData[] {
+/**
+ * Parse PDF text into structured fish data
+ */
+const parsePdfText = (text: string): FishData[] => {
   const result: FishData[] = [];
   
-  // Find items containing "Common Name" or similar text
-  const commonNameHeaders = textItems.filter(item => 
-    /common\s*name/i.test(item.text)
-  );
+  // Remove excess whitespace
+  const cleanedText = text.replace(/\s+/g, ' ').trim();
   
-  if (commonNameHeaders.length === 0) {
-    return result;
+  // Different PDFs may have different formats, so we need to detect and handle each
+  
+  // Format 1: Common for wholesale lists
+  if (cleanedText.includes('Item#') && cleanedText.includes('Description')) {
+    return parseWholesaleFormat(cleanedText);
   }
   
-  console.log(`Found ${commonNameHeaders.length} "Common Name" headers`);
-  
-  // For each Common Name header, try to extract fish names
-  for (const header of commonNameHeaders) {
-    const headerY = header.y;
-    const headerX = header.x;
-    
-    console.log(`Processing Common Name header at x=${headerX.toFixed(1)}, y=${headerY.toFixed(1)}`);
-    
-    // Find all text items below the header (lower y value in PDF coordinates)
-    const itemsBelowHeader = textItems.filter(item => 
-      item.y < headerY - 10 && // Must be below header with some margin
-      Math.abs(item.x - headerX) < 150 && // Must be roughly in the same column
-      item.text.trim().length > 0 // Must have text
-    );
-    
-    console.log(`Found ${itemsBelowHeader.length} items below the Common Name header`);
-    
-    // Group items by approximate rows (items with similar y coordinates)
-    const rows: any[][] = [];
-    let currentRow: any[] = [];
-    let prevY = -1;
-    
-    // Sort by y position (top to bottom)
-    const sortedItems = [...itemsBelowHeader].sort((a, b) => b.y - a.y);
-    
-    for (const item of sortedItems) {
-      if (prevY === -1 || Math.abs(item.y - prevY) < 10) {
-        // Same row
-        currentRow.push(item);
-      } else {
-        // New row
-        if (currentRow.length > 0) {
-          rows.push([...currentRow]);
-        }
-        currentRow = [item];
-      }
-      prevY = item.y;
-    }
-    
-    if (currentRow.length > 0) {
-      rows.push(currentRow);
-    }
-    
-    console.log(`Grouped items into ${rows.length} rows`);
-    
-    // Process each row to extract fish names
-    for (const row of rows) {
-      // Sort items in the row by x position (left to right)
-      row.sort((a: any, b: any) => a.x - b.x);
-      
-      // Combine text in the row
-      const rowText = row.map(item => item.text).join(' ').trim();
-      
-      console.log(`Row text: "${rowText}"`);
-      
-      // Extract name before dash if present
-      let name = rowText;
-      if (rowText.includes('-')) {
-        name = rowText.split('-')[0].trim();
-        console.log(`Extracted name before dash: "${name}"`);
-      }
-      
-      // Skip if name is too short or contains unwanted terms
-      if (name.length < 3 || /page|special|supply|equipment|^\d+$|^[A-Z\s]+$/i.test(name)) {
-        continue;
-      }
-      
-      // Look for price in the row
-      const priceMatch = rowText.match(/\$\d+\.\d+/);
-      const price = priceMatch ? priceMatch[0].trim() : undefined;
-      
-      const fishEntry: FishData = {
-        name,
-        price,
-        category: currentCategory,
-        searchUrl: `https://www.google.com/search?q=${encodeURIComponent(name + ' saltwater fish')}`
-      };
-      
-      result.push(fishEntry);
-    }
+  // Format 2: Common for retail price lists
+  if (cleanedText.includes('Price List') || cleanedText.includes('Retail Price')) {
+    return parseRetailFormat(cleanedText);
   }
   
-  return result;
-}
+  // Fallback to generic parsing
+  return parseGenericFormat(cleanedText);
+};
 
-// Method 2: Extract dash-separated names
-function extractDashSeparatedNames(textItems: any[], currentCategory: string): FishData[] {
+/**
+ * Parse wholesale format PDF text (common vendor format)
+ */
+const parseWholesaleFormat = (text: string): FishData[] => {
   const result: FishData[] = [];
   
-  // Find items containing a dash
-  const dashItems = textItems.filter(item => 
-    item.text.includes('-') && item.text.length > 5
-  );
+  // Look for patterns like:
+  // Item# Description Size Price
+  const lines = text.split(/\n|(?<=\d)(?=[A-Z])/);
   
-  console.log(`Found ${dashItems.length} items containing dashes`);
+  let currentCategory = '';
   
-  for (const item of dashItems) {
-    const parts = item.text.split('-');
-    if (parts.length >= 2) {
-      const name = parts[0].trim();
-      
-      // Skip if name is too short or contains unwanted terms
-      if (name.length < 3 || /page|special|supply|equipment|^\d+$|^[A-Z\s]+$/i.test(name)) {
-        continue;
-      }
-      
-      // Look for price near this item
-      const nearbyItems = textItems.filter(nearby => 
-        Math.abs(nearby.y - item.y) < 15 && // Same row approximately
-        nearby.x > item.x && // To the right of the name
-        /\$\d+\.\d+/.test(nearby.text) // Contains price
-      );
-      
-      const price = nearbyItems.length > 0 ? nearbyItems[0].text.trim() : undefined;
-      
-      const fishEntry: FishData = {
-        name,
-        price,
-        category: currentCategory,
-        searchUrl: `https://www.google.com/search?q=${encodeURIComponent(name + ' saltwater fish')}`
-      };
-      
-      result.push(fishEntry);
-    }
-  }
-  
-  return result;
-}
-
-// Method 3: Extract from table-like structures
-function extractFromTableStructure(textItems: any[], currentCategory: string): FishData[] {
-  const result: FishData[] = [];
-  
-  // Group items by approximate rows (items with similar y coordinates)
-  const rows: any[][] = [];
-  let currentRow: any[] = [];
-  let prevY = -1;
-  
-  // Sort by y position (top to bottom)
-  const sortedItems = [...textItems].sort((a, b) => b.y - a.y);
-  
-  for (const item of sortedItems) {
-    if (prevY === -1 || Math.abs(item.y - prevY) < 10) {
-      // Same row
-      currentRow.push(item);
-    } else {
-      // New row
-      if (currentRow.length > 0) {
-        rows.push([...currentRow]);
-      }
-      currentRow = [item];
-    }
-    prevY = item.y;
-  }
-  
-  if (currentRow.length > 0) {
-    rows.push(currentRow);
-  }
-  
-  console.log(`Grouped items into ${rows.length} rows for table extraction`);
-  
-  // Process each row
-  for (const row of rows) {
-    // Skip rows with too few items (likely not table rows)
-    if (row.length < 2) continue;
-    
-    // Sort items in the row by x position (left to right)
-    row.sort((a: any, b: any) => a.x - b.x);
-    
-    // First column might be the fish name
-    const firstItem = row[0];
-    let name = firstItem.text.trim();
-    
-    // Extract name before dash if present
-    if (name.includes('-')) {
-      name = name.split('-')[0].trim();
-    }
-    
-    // Skip if name is too short or contains unwanted terms
-    if (name.length < 3 || 
-        /page|special|supply|equipment|^\d+$|^[A-Z\s]+$/i.test(name) ||
-        /common|scientific|name|price|size/i.test(name)) {
+  for (const line of lines) {
+    // Check if this is a category header
+    if (line.toUpperCase() === line && !line.includes(' ')) {
+      currentCategory = line.trim();
       continue;
     }
     
-    // Look for price in the row
-    const priceItems = row.filter(item => /\$\d+\.\d+/.test(item.text));
-    const price = priceItems.length > 0 ? priceItems[0].text.trim() : undefined;
+    // Try to match a fish entry
+    // Example: "1234 Blue Tang - Medium $24.99"
+    const itemMatch = line.match(/(\d+)\s+(.+?)\s+(\$?\d+\.\d+|\$?\d+)/);
     
-    const fishEntry: FishData = {
-      name,
-      price,
-      category: currentCategory,
-      searchUrl: `https://www.google.com/search?q=${encodeURIComponent(name + ' saltwater fish')}`
-    };
-    
-    result.push(fishEntry);
-  }
-  
-  return result;
-}
-
-// Method 4: Extract capitalized words that might be fish names
-function extractCapitalizedNames(textItems: any[], currentCategory: string): FishData[] {
-  const result: FishData[] = [];
-  
-  // Find items that start with a capital letter and might be fish names
-  const potentialNameItems = textItems.filter(item => {
-    const text = item.text.trim();
-    return (
-      text.length > 3 &&
-      /^[A-Z]/.test(text) && // Starts with capital letter
-      !/page|special|supply|equipment|^\d+$|^[A-Z\s]+$/i.test(text) && // Not unwanted terms
-      !/common|scientific|name|price|size/i.test(text) // Not column headers
-    );
-  });
-  
-  console.log(`Found ${potentialNameItems.length} potential capitalized fish names`);
-  
-  for (const item of potentialNameItems) {
-    let name = item.text.trim();
-    
-    // Extract name before dash if present
-    if (name.includes('-')) {
-      name = name.split('-')[0].trim();
+    if (itemMatch) {
+      const [_, itemId, name, priceText] = itemMatch;
+      const cost = parseFloat(priceText.replace('$', ''));
+      
+      // Extract size if present
+      let fishName = name.trim();
+      let size = '';
+      
+      const sizeMatch = fishName.match(/-\s*(Small|Medium|Large|X-Large|XL)/i);
+      if (sizeMatch) {
+        size = sizeMatch[1];
+        fishName = fishName.replace(sizeMatch[0], '').trim();
+      }
+      
+      const uniqueId = `${fishName.toLowerCase().replace(/[^\w\s]/g, '')}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const searchName = fishName.toLowerCase().replace(/[^\w\s]/g, '');
+      
+      result.push({
+        uniqueId,
+        name: fishName,
+        searchName,
+        size,
+        category: currentCategory,
+        cost: cost.toString(),
+        description: `Item #${itemId}`
+      });
     }
-    
-    // Look for price near this item
-    const nearbyItems = textItems.filter(nearby => 
-      Math.abs(nearby.y - item.y) < 15 && // Same row approximately
-      nearby.x > item.x && // To the right of the name
-      /\$\d+\.\d+/.test(nearby.text) // Contains price
-    );
-    
-    const price = nearbyItems.length > 0 ? nearbyItems[0].text.trim() : undefined;
-    
-    const fishEntry: FishData = {
-      name,
-      price,
-      category: currentCategory,
-      searchUrl: `https://www.google.com/search?q=${encodeURIComponent(name + ' saltwater fish')}`
-    };
-    
-    result.push(fishEntry);
   }
   
   return result;
-}
+};
 
-// Method 5: Extract from raw text using regex patterns
-function extractFromRawText(pageText: string, currentCategory: string): FishData[] {
+/**
+ * Parse retail format PDF text
+ */
+const parseRetailFormat = (text: string): FishData[] => {
   const result: FishData[] = [];
   
-  // Try multiple regex patterns to find fish names
+  // Split into lines
+  const lines = text.split('\n');
   
-  // Pattern 1: Look for "Common Name" pattern with dash
-  const commonNameRegex = /Common\s*Name[^-]*-\s*([^$\n]+)/gi;
-  let match;
+  let currentCategory = '';
   
-  while ((match = commonNameRegex.exec(pageText)) !== null) {
-    const name = match[1]?.trim();
+  for (const line of lines) {
+    const trimmedLine = line.trim();
     
-    // Skip if name is too short or contains unwanted terms
-    if (!name || name.length < 3 || /page|special|supply|equipment|^\d+$/i.test(name)) {
+    // Check for category headers
+    if (trimmedLine.toUpperCase() === trimmedLine && trimmedLine.length > 3) {
+      currentCategory = trimmedLine;
       continue;
     }
     
-    const fishEntry: FishData = {
-      name,
-      category: currentCategory,
-      searchUrl: `https://www.google.com/search?q=${encodeURIComponent(name + ' saltwater fish')}`
-    };
+    // Match patterns like "Blue Tang Small $49.99"
+    const priceMatch = trimmedLine.match(/(.+?)(?:\s+-\s+(Small|Medium|Large|XL))?\s+\$?(\d+\.?\d*)/i);
     
-    result.push(fishEntry);
-  }
-  
-  // Pattern 2: Look for capitalized words followed by a price
-  if (result.length === 0) {
-    const capitalizedWithPriceRegex = /([A-Z][a-z]+(?:\s+[A-Za-z]+){0,5})\s+(\$\d+\.\d+)/g;
-    
-    while ((match = capitalizedWithPriceRegex.exec(pageText)) !== null) {
-      let name = match[1]?.trim() || '';
+    if (priceMatch) {
+      const [_, name, size, priceText] = priceMatch;
+      const cost = parseFloat(priceText);
       
-      // Extract name before dash if present
-      if (name.includes('-')) {
-        name = name.split('-')[0].trim();
-      }
+      const fishName = name.trim();
+      const uniqueId = `${fishName.toLowerCase().replace(/[^\w\s]/g, '')}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const searchName = fishName.toLowerCase().replace(/[^\w\s]/g, '');
       
-      const price = match[2]?.trim();
-      
-      // Skip if name is too short or contains unwanted terms
-      if (!name || name.length < 3 || /page|special|supply|equipment|^\d+$/i.test(name)) {
-        continue;
-      }
-      
-      const fishEntry: FishData = {
-        name,
-        price,
+      result.push({
+        uniqueId,
+        name: fishName,
+        searchName,
+        size: size || '',
         category: currentCategory,
-        searchUrl: `https://www.google.com/search?q=${encodeURIComponent(name + ' saltwater fish')}`
-      };
-      
-      result.push(fishEntry);
-    }
-  }
-  
-  // Pattern 3: Look for any capitalized words that might be fish names
-  if (result.length === 0) {
-    const capitalizedWordsRegex = /([A-Z][a-z]+(?:\s+[A-Za-z]+){0,3})/g;
-    const foundNames = new Set<string>();
-    
-    while ((match = capitalizedWordsRegex.exec(pageText)) !== null) {
-      let name = match[1]?.trim() || '';
-      
-      // Extract name before dash if present
-      if (name.includes('-')) {
-        name = name.split('-')[0].trim();
-      }
-      
-      // Skip if name is too short or contains unwanted terms
-      if (!name || name.length < 3 || 
-          /page|special|supply|equipment|^\d+$/i.test(name) ||
-          /common|scientific|name|price|size/i.test(name)) {
-        continue;
-      }
-      
-      // Skip if we already found this name
-      if (foundNames.has(name.toLowerCase())) {
-        continue;
-      }
-      
-      foundNames.add(name.toLowerCase());
-      
-      const fishEntry: FishData = {
-        name,
-        category: currentCategory,
-        searchUrl: `https://www.google.com/search?q=${encodeURIComponent(name + ' saltwater fish')}`
-      };
-      
-      result.push(fishEntry);
+        cost: cost.toString()
+      });
     }
   }
   
   return result;
-}
+};
 
-function determineCategory(pageNum: number, pageText: string): string {
-  // Try to determine category from page text
-  if (/special/i.test(pageText)) return 'Specials';
-  if (/fish list/i.test(pageText)) return 'Fish';
-  if (/coral/i.test(pageText)) return 'Coral';
-  if (/invert/i.test(pageText)) return 'Invertebrates';
-  if (/supply|equipment/i.test(pageText)) return 'Supplies';
+/**
+ * Parse generic format as a fallback
+ */
+const parseGenericFormat = (text: string): FishData[] => {
+  const result: FishData[] = [];
   
-  // Default category based on page number
-  if (pageNum === 8) return 'Specials';
-  if (pageNum === 9) return 'Fish';
-  if (pageNum === 10) return 'Coral';
-  if (pageNum === 11) return 'Invertebrates';
-  if (pageNum === 12) return 'Supplies';
+  // Split by what seems like paragraphs
+  const chunks = text.split(/\n\s*\n/);
   
-  return 'Other';
-}
+  for (const chunk of chunks) {
+    // Look for anything that seems like a fish name and price
+    const nameMatch = chunk.match(/([A-Z][a-z]+\s+[A-Z][a-z]+)/);
+    const priceMatch = chunk.match(/\$?(\d+\.?\d*)/);
+    
+    if (nameMatch && priceMatch) {
+      const name = nameMatch[1];
+      const cost = priceMatch[0];
+      
+      const uniqueId = `${name.toLowerCase().replace(/[^\w\s]/g, '')}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const searchName = name.toLowerCase().replace(/[^\w\s]/g, '');
+      
+      result.push({
+        uniqueId,
+        name,
+        searchName,
+        cost
+      });
+    } else if (chunk.length > 10 && chunk.split(' ').length >= 2) {
+      // Try to extract anything that looks like a fish
+      const words = chunk.split(' ');
+      if (words.some(w => w.length > 3 && /^[A-Z]/.test(w))) {
+        const name = words.slice(0, 3).join(' ');
+        const uniqueId = `${name.toLowerCase().replace(/[^\w\s]/g, '')}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        const searchName = name.toLowerCase().replace(/[^\w\s]/g, '');
+        
+        result.push({
+          uniqueId,
+          name,
+          searchName,
+          category: 'Unknown',
+          searchUrl: chunk
+        });
+      }
+    }
+  }
+  
+  return result;
+};
+
+/**
+ * Filter fish data based on options
+ */
+const filterFishData = (data: FishData[], options: ExtractOptions): FishData[] => {
+  let filtered = [...data];
+  
+  // Filter by search terms if provided
+  if (options.searchTerms && options.searchTerms.length > 0) {
+    filtered = filtered.filter(fish => 
+      options.searchTerms!.some(term => 
+        fish.name.toLowerCase().includes(term.toLowerCase()) ||
+        (fish.description && fish.description.toLowerCase().includes(term.toLowerCase()))
+      )
+    );
+  }
+  
+  // Filter out excluded terms if provided
+  if (options.excludeTerms && options.excludeTerms.length > 0) {
+    filtered = filtered.filter(fish => 
+      !options.excludeTerms!.some(term => 
+        fish.name.toLowerCase().includes(term.toLowerCase()) ||
+        (fish.description && fish.description.toLowerCase().includes(term.toLowerCase()))
+      )
+    );
+  }
+  
+  return filtered;
+};

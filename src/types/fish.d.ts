@@ -6,7 +6,7 @@ declare interface FishData {
   category?: string;
   size?: string;
   cost?: string | number;
-  price?: string | number; // Added this property to fix type errors
+  price?: string | number;
   description?: string;
   qtyoh?: number;
   original_cost?: number;
@@ -14,5 +14,4 @@ declare interface FishData {
   disabled?: boolean;
   archived?: boolean;
   searchUrl?: string;
-  // Add any other properties that might be used
 }
